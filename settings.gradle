@@ -1,0 +1,2 @@
+rootProject.name='Scene Lookup'
+include ':app'
