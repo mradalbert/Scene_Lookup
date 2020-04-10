@@ -22,7 +22,7 @@
         android:requestLegacyExternalStorage="true">
         <activity
             android:name=".MainActivity"
-            android:screenOrientation="nosensor" >
+            android:screenOrientation="fullSensor" >
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 

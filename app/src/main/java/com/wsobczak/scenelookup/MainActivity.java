@@ -10,9 +10,12 @@ import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.ImageFormat;
 import android.graphics.SurfaceTexture;
+import android.hardware.Sensor;
+import android.hardware.SensorManager;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraCharacteristics;
@@ -23,6 +26,8 @@ import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.StreamConfigurationMap;
+import android.location.Location;
+import android.media.ExifInterface;
 import android.media.Image;
 import android.media.ImageReader;
 import android.net.Uri;
@@ -34,11 +39,20 @@ import android.os.HandlerThread;
 import android.provider.MediaStore;
 import android.util.Size;
 import android.util.SparseArray;
+import android.view.Display;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
+import android.view.WindowManager;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import com.google.android.gms.location.FusedLocationProviderClient;
+import com.google.android.gms.location.LocationCallback;
+import com.google.android.gms.location.LocationRequest;
+import com.google.android.gms.location.LocationResult;
+import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.tasks.OnSuccessListener;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -71,11 +85,104 @@ public class MainActivity extends AppCompatActivity {
     private String mCameraID;
     private Size mPreviewSize;
     private TextureView mTextureView;
-    private TextView mTextView;
+    private TextView debugFPStv;
+    private TextView debugGPStv;
     private CameraDevice mCameraDevice;
     private CaptureRequest mPreviewCaptureRequest;
     private CaptureRequest.Builder mPreviewCaptureRequestBuilder;
     private CameraCaptureSession mCameraCaptureSession;
+    private HandlerThread mBackgroundThread;
+    private Handler mBackgroundHandler;
+    private static File mImageFile;
+    private ImageReader mImageReader;
+    private File mGalleryFolder;
+    private FusedLocationProviderClient fusedLocationProviderClient;
+    private LocationRequest locationRequest;
+    private LocationCallback locationCallback;
+    public Location mLocation;
+    private SensorManager mSensorManager;
+    private Sensor mOrientationSensor;
+    private long displayRefreshInterval;
+
+    private String[] PERMISSIONS_LIST = {
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.WRITE_EXTERNAL_STORAGE,
+            Manifest.permission.CAMERA
+    };
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        Display display = ((WindowManager) getSystemService(Context.WINDOW_SERVICE)).getDefaultDisplay();
+        displayRefreshInterval = (long) (1 / display.getRefreshRate() * 1000);
+        display = null;
+
+        setContentView(R.layout.activity_main);
+        mTextureView = findViewById(R.id.textureView);
+        debugFPStv = findViewById(R.id.debugFPStv);
+        debugGPStv = findViewById(R.id.debugGPStv);
+
+        requestPermissions(PERMISSIONS_LIST);
+
+        locationRequest = new LocationRequest();
+        locationRequest.setInterval(displayRefreshInterval);
+        locationRequest.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
+        fusedLocationProviderClient = LocationServices.getFusedLocationProviderClient(this);
+        fusedLocationProviderClient.getLastLocation().addOnSuccessListener(this, new OnSuccessListener<Location>() {
+            @Override
+            public void onSuccess(Location location) {
+                mLocation = location;
+                if (location != null) {
+                    debugGPStv.setText("latitude: " + location.getLatitude() +
+                            "\nLongitude: " + location.getLongitude());
+                }
+            }
+        });
+
+
+        mSensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
+        mOrientationSensor = mSensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
+
+
+        locationCallback = new LocationCallback() {
+            @Override
+            public void onLocationResult(LocationResult locationResult) {
+                super.onLocationResult(locationResult);
+                for (Location location : locationResult.getLocations()) {
+                    if (location != null) {
+                        debugGPStv.setText("latitude: " + location.getLatitude() +
+                                "\nLongitude: " + location.getLongitude());
+                    }
+                }
+            }
+        };
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        hideSystemUI();
+        openBackgroundThread();
+
+        if (mTextureView.isAvailable()) {
+            setupCamera(mTextureView.getWidth(), mTextureView.getHeight());
+            openCamera();
+        } else {
+            mTextureView.setSurfaceTextureListener(mSurfaceTextureListener);
+        }
+
+        startLocationUpdates();
+    }
+
+    @Override
+    public void onPause() {
+        super.onPause();
+        closeCamera();
+        closeBackgroundThread();
+        stopLocationUpdates();
+    }
+
     private CameraCaptureSession.CaptureCallback mSessionCaptureCallback = new CameraCaptureSession.CaptureCallback() {
         private void process(CaptureResult result) {
             switch (mState) {
@@ -84,7 +191,7 @@ public class MainActivity extends AppCompatActivity {
                     break;
                 case STATE_WAIT_LOCK:
                     Integer afState = result.get(CaptureResult.CONTROL_AF_STATE);
-                    if (afState == CaptureRequest.CONTROL_AF_STATE_FOCUSED_LOCKED) {
+                    if (afState == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED) {
                         captureStillImage();
                         mState = STATE_PREVIEW;
                     }
@@ -106,8 +213,6 @@ public class MainActivity extends AppCompatActivity {
         @Override
         public void onCaptureFailed(@NonNull CameraCaptureSession session, @NonNull CaptureRequest request, @NonNull CaptureFailure failure) {
             super.onCaptureFailed(session, request, failure);
-
-            Toast.makeText(getApplicationContext(), "Focus lock fail!", Toast.LENGTH_SHORT).show();
         }
     };
 
@@ -155,37 +260,26 @@ public class MainActivity extends AppCompatActivity {
             float frameTime = (float) (System.nanoTime() - lastFrameTime)/1000000;
             lastFrameTime = System.nanoTime();
 
-            mTextView.setText(String.valueOf(frameTime) +
+            debugFPStv.setText(String.valueOf(frameTime) +
                     " ms\n" + 1/frameTime*1000 + " FPS");
 
         }
     };
 
-    private String[] PERMISSIONS_LIST = {
-            Manifest.permission.ACCESS_FINE_LOCATION,
-            Manifest.permission.WRITE_EXTERNAL_STORAGE,
-            Manifest.permission.CAMERA
-    };
-
-    private HandlerThread mBackgroundThread;
-    private Handler mBackgroundHandler;
-    private static File mImageFile;
-    private ImageReader mImageReader;
-    private File mGalleryFolder;
-
     private final ImageReader.OnImageAvailableListener mOnImageAvailableListener = new ImageReader.OnImageAvailableListener() {
         @Override
         public void onImageAvailable(ImageReader reader) {
-            mBackgroundHandler.post(new ImageSaver(reader.acquireNextImage()));
+            mBackgroundHandler.post(new ImageSaver(reader.acquireNextImage(), mLocation));
         }
     };
 
-
     private static class ImageSaver implements Runnable {
         private final Image mImage;
+        private final Location mLocation;
 
-        private ImageSaver(Image image) {
+        private ImageSaver(Image image, Location location) {
             mImage = image;
+            mLocation = location;
         }
 
         @Override
@@ -212,41 +306,21 @@ public class MainActivity extends AppCompatActivity {
                     }
                 }
             }
+            try {
+                ExifInterface exif = new ExifInterface(mImageFile.getAbsolutePath());
+                exif.setAttribute(ExifInterface.TAG_USER_COMMENT, "zapisuje sie");
+                String t = exif.getAttribute(ExifInterface.TAG_USER_COMMENT);
+                exif.saveAttributes();
+
+                ExifInterface exif2 = new ExifInterface(mImageFile.getAbsolutePath());
+                String tt = exif.getAttribute(ExifInterface.TAG_USER_COMMENT);
+                exif.saveAttributes();
+
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+
         }
-    }
-
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        hideSystemUI();
-        //createImageFile();
-
-        setContentView(R.layout.activity_main);
-        requestPermissions(PERMISSIONS_LIST);
-        mTextureView = findViewById(R.id.textureView);
-        mTextView = findViewById(R.id.textView);
-        createImageGallery();
-    }
-
-    @Override
-    public void onResume() {
-        super.onResume();
-        hideSystemUI();
-        openBackgroundThread();
-
-        if (mTextureView.isAvailable()) {
-            setupCamera(mTextureView.getWidth(), mTextureView.getHeight());
-            openCamera();
-        } else {
-            mTextureView.setSurfaceTextureListener(mSurfaceTextureListener);
-        }
-    }
-
-    @Override
-    public void onPause() {
-        closeCamera();
-        closeBackgroundThread();
-        super.onPause();
     }
 
     public static boolean hasPermissions(Context context, String... permissions) {
@@ -473,10 +547,12 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private File createImageFile() throws IOException {
+        createImageGallery();
         String timeStamp = new SimpleDateFormat("yyyy-MM-dd_HH:mm:ss").format(new Date());
         String imageFileName = timeStamp;
 
-            File image = File.createTempFile(imageFileName, ".jpg", mGalleryFolder);
+           // File image = File.createTempFile(imageFileName, ".jpg", mGalleryFolder);
+            File image = new File(mGalleryFolder, imageFileName + ".jpg");
 
         //mImageFileLocation = image.getAbsolutePath();
 
@@ -515,4 +591,13 @@ public class MainActivity extends AppCompatActivity {
         fos.flush();
         fos.close();
     }
+
+    private void startLocationUpdates() {
+        fusedLocationProviderClient.requestLocationUpdates(locationRequest, locationCallback, null);
+    }
+
+    private void stopLocationUpdates() {
+        fusedLocationProviderClient.removeLocationUpdates(locationCallback);
+    }
+
 }
