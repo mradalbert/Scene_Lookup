@@ -10,11 +10,12 @@ import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.pm.PackageManager;
-import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.ImageFormat;
 import android.graphics.SurfaceTexture;
 import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
@@ -27,8 +28,6 @@ import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.location.Location;
-import android.media.ExifInterface;
-import android.media.Image;
 import android.media.ImageReader;
 import android.net.Uri;
 import android.os.Build;
@@ -40,6 +39,7 @@ import android.provider.MediaStore;
 import android.util.Size;
 import android.util.SparseArray;
 import android.view.Display;
+import android.view.OrientationEventListener;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
@@ -52,13 +52,11 @@ import com.google.android.gms.location.LocationCallback;
 import com.google.android.gms.location.LocationRequest;
 import com.google.android.gms.location.LocationResult;
 import com.google.android.gms.location.LocationServices;
-import com.google.android.gms.tasks.OnSuccessListener;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
-import java.nio.ByteBuffer;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -67,20 +65,20 @@ import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
 
-public class MainActivity extends AppCompatActivity {
+public class MainActivity extends AppCompatActivity implements SensorEventListener {
     private static final SparseArray ORIENTATIONS = new SparseArray();
     private static final String IMAGES_FOLDER_NAME = "Scene Lookup";
+    private byte jpegQuality = 100;
 
     static  {
         ORIENTATIONS.append(Surface.ROTATION_0, 90);
-        ORIENTATIONS.append(Surface.ROTATION_90, 0);
+        ORIENTATIONS.append(Surface.ROTATION_90, 180);
         ORIENTATIONS.append(Surface.ROTATION_180, 270);
-        ORIENTATIONS.append(Surface.ROTATION_270, 180);
+        ORIENTATIONS.append(Surface.ROTATION_270, 0);
     }
 
     private static final int STATE_PREVIEW = 0;
     private static final int STATE_WAIT_LOCK = 1;
-    long lastFrameTime = System.nanoTime();
     private int mState;
     private String mCameraID;
     private Size mPreviewSize;
@@ -103,6 +101,10 @@ public class MainActivity extends AppCompatActivity {
     private SensorManager mSensorManager;
     private Sensor mOrientationSensor;
     private long displayRefreshInterval;
+    private float[] mOrientation = new float[3];
+
+    private OrientationEventListener listener;
+    private int rotation = 0;
 
     private String[] PERMISSIONS_LIST = {
             Manifest.permission.ACCESS_FINE_LOCATION,
@@ -113,10 +115,6 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-
-        Display display = ((WindowManager) getSystemService(Context.WINDOW_SERVICE)).getDefaultDisplay();
-        displayRefreshInterval = (long) (1 / display.getRefreshRate() * 1000);
-        display = null;
 
         setContentView(R.layout.activity_main);
         mTextureView = findViewById(R.id.textureView);
@@ -129,21 +127,9 @@ public class MainActivity extends AppCompatActivity {
         locationRequest.setInterval(displayRefreshInterval);
         locationRequest.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
         fusedLocationProviderClient = LocationServices.getFusedLocationProviderClient(this);
-        fusedLocationProviderClient.getLastLocation().addOnSuccessListener(this, new OnSuccessListener<Location>() {
-            @Override
-            public void onSuccess(Location location) {
-                mLocation = location;
-                if (location != null) {
-                    debugGPStv.setText("latitude: " + location.getLatitude() +
-                            "\nLongitude: " + location.getLongitude());
-                }
-            }
-        });
-
 
         mSensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
         mOrientationSensor = mSensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
-
 
         locationCallback = new LocationCallback() {
             @Override
@@ -151,19 +137,36 @@ public class MainActivity extends AppCompatActivity {
                 super.onLocationResult(locationResult);
                 for (Location location : locationResult.getLocations()) {
                     if (location != null) {
+                        mLocation = location;
                         debugGPStv.setText("latitude: " + location.getLatitude() +
-                                "\nLongitude: " + location.getLongitude());
+                                "\nLongitude: " + location.getLongitude() +
+                                "\nAltitude: " + location.getAltitude());
                     }
                 }
             }
         };
+
+        listener = new OrientationEventListener(this, SensorManager.SENSOR_DELAY_NORMAL) {
+            @Override
+            public void onOrientationChanged(int orientation) {
+                rotation = ((orientation + 45) / 90) % 4;
+                debugFPStv.setRotation(rotation * -90);
+            }
+        };
+        if (listener.canDetectOrientation()) listener.enable();
+        else listener = null;
     }
 
     @Override
     public void onResume() {
         super.onResume();
+
         hideSystemUI();
         openBackgroundThread();
+
+        Display display = ((WindowManager) getSystemService(Context.WINDOW_SERVICE)).getDefaultDisplay();
+        displayRefreshInterval = (long) (1 / display.getRefreshRate() * 1000);
+        display = null;
 
         if (mTextureView.isAvailable()) {
             setupCamera(mTextureView.getWidth(), mTextureView.getHeight());
@@ -173,6 +176,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
         startLocationUpdates();
+        mSensorManager.registerListener((SensorEventListener) this, mOrientationSensor, SensorManager.SENSOR_DELAY_UI);
     }
 
     @Override
@@ -181,6 +185,40 @@ public class MainActivity extends AppCompatActivity {
         closeCamera();
         closeBackgroundThread();
         stopLocationUpdates();
+        mSensorManager.unregisterListener((SensorEventListener) this);
+    }
+
+    @Override
+    public void onSensorChanged(SensorEvent event) {
+        float[] rotMatrix = new float[9];
+        float[] correctedRotMatrix = new float[9];
+
+        SensorManager.getRotationMatrixFromVector(rotMatrix, event.values);
+        /*
+        correctedRotMatrix[0]=-rotMatrix[1];
+        correctedRotMatrix[1]=rotMatrix[2];
+        correctedRotMatrix[2]=rotMatrix[0];
+        correctedRotMatrix[3]=-rotMatrix[4];
+        correctedRotMatrix[4]=rotMatrix[5];
+        correctedRotMatrix[5]=rotMatrix[3];
+        correctedRotMatrix[6]=-rotMatrix[7];
+        correctedRotMatrix[7]=rotMatrix[8];
+        correctedRotMatrix[8]=rotMatrix[6];
+        */
+        SensorManager.remapCoordinateSystem(rotMatrix, SensorManager.AXIS_Z, SensorManager.AXIS_MINUS_X, correctedRotMatrix);
+        SensorManager.getOrientation(correctedRotMatrix, mOrientation);
+        mOrientation[0] = mOrientation[0]*180/(float)Math.PI;
+        mOrientation[1] = mOrientation[1]*-180/(float)Math.PI;
+        mOrientation[2] = mOrientation[2]*180/(float)Math.PI;
+
+        debugFPStv.setText("Yaw: " + mOrientation[0] +
+                "\nPitch: " + mOrientation[1] +
+                "\nRoll: " + mOrientation[2]);
+    }
+
+    @Override
+    public void onAccuracyChanged(Sensor sensor, int accuracy) {
+
     }
 
     private CameraCaptureSession.CaptureCallback mSessionCaptureCallback = new CameraCaptureSession.CaptureCallback() {
@@ -191,9 +229,16 @@ public class MainActivity extends AppCompatActivity {
                     break;
                 case STATE_WAIT_LOCK:
                     Integer afState = result.get(CaptureResult.CONTROL_AF_STATE);
-                    if (afState == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED) {
-                        captureStillImage();
-                        mState = STATE_PREVIEW;
+                    switch (afState) {
+                        case CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED:
+                            captureStillImage();
+                            mState = STATE_PREVIEW;
+                            break;
+                        case CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED:
+                            Toast.makeText(getApplicationContext(), "Focus failed, keep device still", Toast.LENGTH_SHORT).show();
+                            unlockFocus();
+                            mState = STATE_PREVIEW;
+                            break;
                     }
                     break;
             }
@@ -256,72 +301,24 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void onSurfaceTextureUpdated(SurfaceTexture surface) {
-
+            /*
             float frameTime = (float) (System.nanoTime() - lastFrameTime)/1000000;
             lastFrameTime = System.nanoTime();
 
             debugFPStv.setText(String.valueOf(frameTime) +
                     " ms\n" + 1/frameTime*1000 + " FPS");
-
+            */
         }
     };
 
     private final ImageReader.OnImageAvailableListener mOnImageAvailableListener = new ImageReader.OnImageAvailableListener() {
         @Override
         public void onImageAvailable(ImageReader reader) {
-            mBackgroundHandler.post(new ImageSaver(reader.acquireNextImage(), mLocation));
+            mBackgroundHandler.post(new ImageSaver(mImageFile, reader.acquireNextImage(), mLocation, mOrientation));
         }
     };
 
-    private static class ImageSaver implements Runnable {
-        private final Image mImage;
-        private final Location mLocation;
 
-        private ImageSaver(Image image, Location location) {
-            mImage = image;
-            mLocation = location;
-        }
-
-        @Override
-        public void run() {
-            ByteBuffer byteBuffer = mImage.getPlanes()[0].getBuffer();
-            byte[] bytes = new byte[byteBuffer.remaining()];
-            byteBuffer.get(bytes);
-
-            FileOutputStream fileOutputStream = null;
-
-            try {
-                fileOutputStream = new FileOutputStream(mImageFile);
-                fileOutputStream.write(bytes);
-            } catch (IOException e) {
-                e.printStackTrace();
-            } finally {
-                mImage.close();
-
-                if (fileOutputStream != null) {
-                    try {
-                        fileOutputStream.close();
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
-                }
-            }
-            try {
-                ExifInterface exif = new ExifInterface(mImageFile.getAbsolutePath());
-                exif.setAttribute(ExifInterface.TAG_USER_COMMENT, "zapisuje sie");
-                String t = exif.getAttribute(ExifInterface.TAG_USER_COMMENT);
-                exif.saveAttributes();
-
-                ExifInterface exif2 = new ExifInterface(mImageFile.getAbsolutePath());
-                String tt = exif.getAttribute(ExifInterface.TAG_USER_COMMENT);
-                exif.saveAttributes();
-
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-
-        }
-    }
 
     public static boolean hasPermissions(Context context, String... permissions) {
         if (context != null && permissions != null) {
@@ -448,7 +445,7 @@ public class MainActivity extends AppCompatActivity {
 
                 @Override
                 public void onConfigureFailed(@NonNull CameraCaptureSession session) {
-                    Toast.makeText(getApplicationContext(), "Creating camera session failed", Toast.LENGTH_SHORT);
+                    Toast.makeText(getApplicationContext(), "Creating camera session failed", Toast.LENGTH_SHORT).show();
                 }
             }, null);
         } catch (CameraAccessException e) {
@@ -458,7 +455,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void hideSystemUI() {
         View decorView = getWindow().getDecorView();
-        decorView.setSystemUiVisibility(View.SYSTEM_UI_FLAG_IMMERSIVE | View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_FULLSCREEN);
+        decorView.setSystemUiVisibility(View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_FULLSCREEN);
     }
 
     private void showSystemUI() {
@@ -503,7 +500,6 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void unlockFocus() {
-        Toast.makeText(getApplicationContext(), "unlock", Toast.LENGTH_SHORT).show();
         mState = STATE_PREVIEW;
         try {
             mPreviewCaptureRequestBuilder.set(mPreviewCaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL);
@@ -519,8 +515,7 @@ public class MainActivity extends AppCompatActivity {
         try {
             CaptureRequest.Builder captureStillImageBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
             captureStillImageBuilder.addTarget(mImageReader.getSurface());
-
-            int rotation = getWindowManager().getDefaultDisplay().getRotation();
+            captureStillImageBuilder.set(CaptureRequest.JPEG_QUALITY, jpegQuality);
             captureStillImageBuilder.set(CaptureRequest.JPEG_ORIENTATION, (Integer) ORIENTATIONS.get(rotation));
 
             CameraCaptureSession.CaptureCallback captureCallback = new CameraCaptureSession.CaptureCallback() {
@@ -548,7 +543,7 @@ public class MainActivity extends AppCompatActivity {
 
     private File createImageFile() throws IOException {
         createImageGallery();
-        String timeStamp = new SimpleDateFormat("yyyy-MM-dd_HH:mm:ss").format(new Date());
+        String timeStamp = new SimpleDateFormat("yyyy-MM-dd_HH:mm:ss.SSS").format(new Date());
         String imageFileName = timeStamp;
 
            // File image = File.createTempFile(imageFileName, ".jpg", mGalleryFolder);
