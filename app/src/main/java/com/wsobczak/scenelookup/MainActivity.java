@@ -1,14 +1,10 @@
 package com.wsobczak.scenelookup;
 
-import androidx.annotation.NonNull;
-import androidx.appcompat.app.AppCompatActivity;
-import androidx.constraintlayout.widget.ConstraintLayout;
-import androidx.core.app.ActivityCompat;
-
 import android.Manifest;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.ImageFormat;
@@ -46,6 +42,11 @@ import android.view.View;
 import android.view.WindowManager;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import androidx.annotation.NonNull;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.constraintlayout.widget.ConstraintLayout;
+import androidx.core.app.ActivityCompat;
 
 import com.google.android.gms.location.FusedLocationProviderClient;
 import com.google.android.gms.location.LocationCallback;
@@ -93,7 +94,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private Handler mBackgroundHandler;
     private static File mImageFile;
     private ImageReader mImageReader;
-    private File mGalleryFolder;
+    private File workingDirectory;
     private FusedLocationProviderClient fusedLocationProviderClient;
     private LocationRequest locationRequest;
     private LocationCallback locationCallback;
@@ -106,12 +107,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private OrientationEventListener listener;
     private int rotation = 0;
 
-    private String[] PERMISSIONS_LIST = {
-            Manifest.permission.ACCESS_FINE_LOCATION,
-            Manifest.permission.WRITE_EXTERNAL_STORAGE,
-            Manifest.permission.CAMERA
-    };
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -120,8 +115,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         mTextureView = findViewById(R.id.textureView);
         debugFPStv = findViewById(R.id.debugFPStv);
         debugGPStv = findViewById(R.id.debugGPStv);
-
-        requestPermissions(PERMISSIONS_LIST);
 
         locationRequest = new LocationRequest();
         locationRequest.setInterval(displayRefreshInterval);
@@ -150,7 +143,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             @Override
             public void onOrientationChanged(int orientation) {
                 rotation = ((orientation + 45) / 90) % 4;
-                debugFPStv.setRotation(rotation * -90);
             }
         };
         if (listener.canDetectOrientation()) listener.enable();
@@ -194,17 +186,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         float[] correctedRotMatrix = new float[9];
 
         SensorManager.getRotationMatrixFromVector(rotMatrix, event.values);
-        /*
-        correctedRotMatrix[0]=-rotMatrix[1];
-        correctedRotMatrix[1]=rotMatrix[2];
-        correctedRotMatrix[2]=rotMatrix[0];
-        correctedRotMatrix[3]=-rotMatrix[4];
-        correctedRotMatrix[4]=rotMatrix[5];
-        correctedRotMatrix[5]=rotMatrix[3];
-        correctedRotMatrix[6]=-rotMatrix[7];
-        correctedRotMatrix[7]=rotMatrix[8];
-        correctedRotMatrix[8]=rotMatrix[6];
-        */
         SensorManager.remapCoordinateSystem(rotMatrix, SensorManager.AXIS_Z, SensorManager.AXIS_MINUS_X, correctedRotMatrix);
         SensorManager.getOrientation(correctedRotMatrix, mOrientation);
         mOrientation[0] = mOrientation[0]*180/(float)Math.PI;
@@ -317,25 +298,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             mBackgroundHandler.post(new ImageSaver(mImageFile, reader.acquireNextImage(), mLocation, mOrientation));
         }
     };
-
-
-
-    public static boolean hasPermissions(Context context, String... permissions) {
-        if (context != null && permissions != null) {
-            for (String permission : permissions) {
-                if (ActivityCompat.checkSelfPermission(context, permission) != PackageManager.PERMISSION_GRANTED) {
-                    return false;
-                }
-            }
-        }
-        return true;
-    }
-
-    private void requestPermissions(String[] PERMISSIONS) {
-        if (!hasPermissions(this, PERMISSIONS)) {
-            ActivityCompat.requestPermissions(this, PERMISSIONS, 1);
-        }
-    }
 
     private void setupCamera(int width, int height) {
         CameraManager cameraManager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
@@ -489,6 +451,12 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         lockFocus();
     }
 
+    public void openProjects(View view) {
+        Intent myIntent = new Intent(this, ProjectActivity.class);
+        //myIntent.putExtra("key", value); //Optional parameters
+        startActivity(myIntent);
+    }
+
     private void lockFocus() {
         try {
             mState = STATE_WAIT_LOCK;
@@ -533,21 +501,21 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         }
     }
 
-    private void createImageGallery() {
-        File storageDirectory = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES);
-        mGalleryFolder = new File(storageDirectory, "Scene Lookup");
-        if(!mGalleryFolder.exists()) {
-            mGalleryFolder.mkdirs();
+    private void createImageFolder() {
+        workingDirectory = new File(getIntent().getStringExtra("workingDirectory"));
+        if(!workingDirectory.exists()) {
+            workingDirectory.mkdirs();
+            Toast.makeText(this, "Project directory not found! Creating new!", Toast.LENGTH_LONG).show();
         }
     }
 
     private File createImageFile() throws IOException {
-        createImageGallery();
+        createImageFolder();
         String timeStamp = new SimpleDateFormat("yyyy-MM-dd_HH:mm:ss.SSS").format(new Date());
         String imageFileName = timeStamp;
 
            // File image = File.createTempFile(imageFileName, ".jpg", mGalleryFolder);
-            File image = new File(mGalleryFolder, imageFileName + ".jpg");
+            File image = new File(workingDirectory, imageFileName + ".jpg");
 
         //mImageFileLocation = image.getAbsolutePath();
 
@@ -594,5 +562,4 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private void stopLocationUpdates() {
         fusedLocationProviderClient.removeLocationUpdates(locationCallback);
     }
-
 }
