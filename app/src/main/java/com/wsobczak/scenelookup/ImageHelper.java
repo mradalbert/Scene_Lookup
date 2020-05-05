@@ -4,8 +4,12 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Matrix;
 import android.media.ExifInterface;
+import android.widget.Toast;
 
 import java.io.IOException;
+import java.nio.file.attribute.GroupPrincipal;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class ImageHelper {
 
@@ -73,5 +77,92 @@ public class ImageHelper {
         matrix.postRotate(angle);
         return Bitmap.createBitmap(source, 0, 0, source.getWidth(), source.getHeight(),
                 matrix, true);
+    }
+
+    public static Bitmap bitmapFromPath(String pathName, int reqWidth, int reqHeight) {
+        final BitmapFactory.Options options = new BitmapFactory.Options();
+
+        options.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(pathName, options);
+
+        options.inSampleSize = calculateInSampleSize(options, reqWidth, reqHeight);
+
+        options.inJustDecodeBounds = false;
+
+        return BitmapFactory.decodeFile(pathName, options);
+    }
+
+    public static float[] getLatLong(String filePath) {
+        float[] latLong = new float[2];
+        try {
+            final ExifInterface exifInterface = new ExifInterface(filePath);
+            if (!exifInterface.getLatLong(latLong)) {
+                return null;
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+            latLong = null;
+        }
+        return latLong;
+    }
+
+    public static float getDirection(String filePath) {
+        float direction = -1;
+        try {
+            final ExifInterface exifInterface = new ExifInterface(filePath);
+
+            if (exifInterface.getAttribute(ExifInterface.TAG_GPS_IMG_DIRECTION_REF) != null && exifInterface.getAttribute(ExifInterface.TAG_GPS_IMG_DIRECTION_REF).equals("T")) {
+                direction = (float) exifInterface.getAttributeDouble(ExifInterface.TAG_GPS_IMG_DIRECTION, -1);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return direction;
+    }
+
+    public static float[] getYawPitchRoll(String filePath) {
+        float[] yawPitchRoll = new float[3];
+        yawPitchRoll[0] = 720;
+        yawPitchRoll[1] = 720;
+        yawPitchRoll[2] = 720;
+        String temp="";
+        String pitch = null, roll = null;
+        try {
+            final ExifInterface exifInterface = new ExifInterface(filePath);
+            temp = exifInterface.getAttribute(ExifInterface.TAG_USER_COMMENT);
+            if (exifInterface.getAttribute(ExifInterface.TAG_GPS_IMG_DIRECTION_REF) != null && exifInterface.getAttribute(ExifInterface.TAG_GPS_IMG_DIRECTION_REF).equals("T")) {
+                yawPitchRoll[0] = (float) exifInterface.getAttributeDouble(ExifInterface.TAG_GPS_IMG_DIRECTION, -1);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        if (!temp.isEmpty()) {
+            pitch = extractDataFromTags(temp, "pitch");
+            roll = extractDataFromTags(temp, "roll");
+        }
+        if (pitch != null) {
+            yawPitchRoll[1] = Float.valueOf(pitch);
+        }
+        if (roll != null) {
+            yawPitchRoll[2] = Float.valueOf(roll);
+        }
+        return yawPitchRoll;
+    }
+
+    public static String extractDataFromTags(String input, String tag) {
+        final Pattern pattern = Pattern.compile("<" + tag + ">(.+?)</" + tag + ">", Pattern.DOTALL);
+        final Matcher matcher = pattern.matcher(input);
+        matcher.find();
+        try {
+            return matcher.group(1);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public static String createTaggedData(String data, String tag) {
+        return "<" + tag + ">" + data + "</" + tag + ">";
     }
 }

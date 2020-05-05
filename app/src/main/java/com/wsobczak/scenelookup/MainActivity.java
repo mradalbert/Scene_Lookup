@@ -7,7 +7,10 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Color;
 import android.graphics.ImageFormat;
+import android.graphics.Point;
 import android.graphics.SurfaceTexture;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
@@ -32,6 +35,7 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.provider.MediaStore;
+import android.util.Log;
 import android.util.Size;
 import android.util.SparseArray;
 import android.view.Display;
@@ -40,6 +44,8 @@ import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
 import android.view.WindowManager;
+import android.widget.ImageView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -57,6 +63,7 @@ import com.google.android.gms.location.LocationServices;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -84,8 +91,13 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private String mCameraID;
     private Size mPreviewSize;
     private TextureView mTextureView;
+    private ImageView mOverlayImageView;
+    private ImageView mBlueArrow, mCompassFace;
     private TextView debugFPStv;
     private TextView debugGPStv;
+    private SeekBar mOverlaySeekBar;
+    private View mTrueLevelView;
+    private View mPhotoLevelView;
     private CameraDevice mCameraDevice;
     private CaptureRequest mPreviewCaptureRequest;
     private CaptureRequest.Builder mPreviewCaptureRequestBuilder;
@@ -102,7 +114,9 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private SensorManager mSensorManager;
     private Sensor mOrientationSensor;
     private long displayRefreshInterval;
+    private int displayWidth, displayHeight;
     private float[] mOrientation = new float[3];
+    private float[] imageDirection = new float[3];
 
     private OrientationEventListener listener;
     private int rotation = 0;
@@ -113,9 +127,18 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
         setContentView(R.layout.activity_main);
         mTextureView = findViewById(R.id.textureView);
+        mOverlayImageView = findViewById(R.id.overlayImageView);
+        mOverlayImageView.setAlpha(0.5f);
+        mBlueArrow = findViewById(R.id.blueArrow);
+        mBlueArrow.setVisibility(View.GONE);
+        mCompassFace = findViewById(R.id.compassFaceView);
         debugFPStv = findViewById(R.id.debugFPStv);
         debugGPStv = findViewById(R.id.debugGPStv);
-
+        mOverlaySeekBar = findViewById(R.id.overlayTransparencySeekBar);
+        mOverlaySeekBar.setProgress(50);
+        mTrueLevelView = findViewById(R.id.trueLevelView);
+        mPhotoLevelView = findViewById(R.id.photoLevelView);
+        mPhotoLevelView.setVisibility(View.GONE);
         locationRequest = new LocationRequest();
         locationRequest.setInterval(displayRefreshInterval);
         locationRequest.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
@@ -143,10 +166,49 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             @Override
             public void onOrientationChanged(int orientation) {
                 rotation = ((orientation + 45) / 90) % 4;
+                //mLevelView.setRotation(-orientation);
             }
         };
         if (listener.canDetectOrientation()) listener.enable();
         else listener = null;
+
+        workingDirectory = new File(getIntent().getStringExtra("workingDirectory"));
+
+        ArrayList<Cell> imageFiles = listAllFiles(workingDirectory.getAbsolutePath());
+
+        if (imageFiles.size() > 0) {
+            Cell oldestFile = Collections.min(imageFiles, new Cell.CellComparator());
+            Bitmap image = ImageHelper.bitmapFromPath(oldestFile.getPath(), 700, 700);
+            image = ImageHelper.rotateImage(image,90);
+            mOverlayImageView.setImageBitmap(image);
+
+            imageDirection = ImageHelper.getYawPitchRoll(oldestFile.getPath());
+
+            if (imageDirection[0] != 720) mBlueArrow.setVisibility(View.VISIBLE);
+            mPhotoLevelView.setRotation(-imageDirection[2] + 90);
+            if (imageDirection[0] != 720) mPhotoLevelView.setVisibility(View.VISIBLE);
+
+        }
+
+        mOverlaySeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                mOverlayImageView.setAlpha(((float)progress/100));
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+
+            }
+        });
+
+        mBlueArrow.setImageBitmap(getBitmapFromAssets("BlueArrow.png"));
+        mCompassFace.setImageBitmap(getBitmapFromAssets("CompassFace.png"));
     }
 
     @Override
@@ -158,6 +220,10 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
         Display display = ((WindowManager) getSystemService(Context.WINDOW_SERVICE)).getDefaultDisplay();
         displayRefreshInterval = (long) (1 / display.getRefreshRate() * 1000);
+        Point size = new Point();
+        display.getSize(size);
+        displayWidth = size.x;
+        displayHeight = size.y;
         display = null;
 
         if (mTextureView.isAvailable()) {
@@ -168,7 +234,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         }
 
         startLocationUpdates();
-        mSensorManager.registerListener((SensorEventListener) this, mOrientationSensor, SensorManager.SENSOR_DELAY_UI);
+        mSensorManager.registerListener((SensorEventListener) this, mOrientationSensor, SensorManager.SENSOR_DELAY_FASTEST);
     }
 
     @Override
@@ -195,6 +261,18 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         debugFPStv.setText("Yaw: " + mOrientation[0] +
                 "\nPitch: " + mOrientation[1] +
                 "\nRoll: " + mOrientation[2]);
+
+
+        int rotationQuarts = (int) -(360+mOrientation[2]+45)/90*90+90;
+        mCompassFace.setRotation(rotationQuarts);
+        mBlueArrow.setRotation(ImageSaver.yawToDirection(mOrientation[0])-imageDirection[0]+rotationQuarts);
+        mTrueLevelView.setRotation(-mOrientation[2]+90);
+
+        if (Math.abs(mOrientation[2] - imageDirection[2]) > 5) {
+            mTrueLevelView.setBackgroundColor(Color.WHITE);
+        } else {
+            mTrueLevelView.setBackgroundColor(Color.GREEN);
+        }
     }
 
     @Override
@@ -561,5 +639,40 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     private void stopLocationUpdates() {
         fusedLocationProviderClient.removeLocationUpdates(locationCallback);
+    }
+
+    private ArrayList<Cell> listAllFiles(String pathName) {
+        String extension;
+        ArrayList<Cell> allFiles = new ArrayList<>();
+        File file = new File(pathName);
+        File[] files = file.listFiles();
+        if (files != null) {
+            for (File f : files) {
+                if (!f.isDirectory()) {
+                    extension = f.getAbsolutePath().substring(f.getAbsolutePath().lastIndexOf(".") + 1);
+                    byte[] bytes = extension.getBytes();
+                    if (extension.equals("jpg")) {
+                        Cell cell = new Cell();
+                        cell.setTitle(f.getName());
+                        cell.setPath(f.getAbsolutePath());
+                        allFiles.add(cell);
+                    }
+                }
+            }
+        }
+        return allFiles;
+    }
+
+    public Bitmap getBitmapFromAssets(String fileName) {
+
+        InputStream istr = null;
+        try {
+            istr = getAssets().open(fileName);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        Bitmap bitmap = BitmapFactory.decodeStream(istr);
+
+        return bitmap;
     }
 }

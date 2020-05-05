@@ -77,10 +77,10 @@ public class ImageSaver implements Runnable {
             exif.setAttribute(ExifInterface.TAG_GPS_PROCESSING_METHOD, location.getProvider());
             exif.setAttribute(ExifInterface.TAG_GPS_IMG_DIRECTION_REF,"T");
             exif.setAttribute(ExifInterface.TAG_GPS_IMG_DIRECTION, (int) (100*yawToDirection(mOrientation[0])) + "/100");
-            exif.setAttribute(ExifInterface.TAG_USER_COMMENT,"CameraElevationAngle: " + mOrientation[1] + "\n" +
-                    "                                               CameraRoll: " + mOrientation[2]);
-            exif.setAttribute(ExifInterface.TAG_USER_COMMENT, "");
-
+            //exif.setAttribute(ExifInterface.TAG_USER_COMMENT,"CameraElevationAngle: " + mOrientation[1] + "\n" + "CameraRoll: " + mOrientation[2]);
+            String elevationRoll = ImageHelper.createTaggedData(String.valueOf(mOrientation[1]), "pitch") + "\n" + ImageHelper.createTaggedData(String.valueOf(mOrientation[2]), "roll");
+            exif.setAttribute(ExifInterface.TAG_USER_COMMENT, elevationRoll);
+            String i = exif.getAttribute(ExifInterface.TAG_USER_COMMENT);
             exif.saveAttributes();
 
             ExifInterface exiff = new ExifInterface(imagePath.getAbsolutePath());
@@ -101,8 +101,8 @@ public class ImageSaver implements Runnable {
         return sOut;
     }
 
-    private float yawToDirection(float yaw) {
-        if (yaw < 0) yaw = 180 - yaw;
+    public static float yawToDirection(float yaw) {
+        if (yaw < 0) yaw = 360 + yaw;
         return yaw;
     }
 }

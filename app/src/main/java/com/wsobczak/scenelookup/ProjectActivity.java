@@ -5,6 +5,7 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
 import android.text.InputType;
@@ -24,6 +25,8 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Locale;
 
 public class ProjectActivity extends AppCompatActivity implements AdapterView.OnItemSelectedListener {
 
@@ -35,6 +38,7 @@ public class ProjectActivity extends AppCompatActivity implements AdapterView.On
 
     private Spinner spinnerProject;
 
+    public static boolean GALLERY_REFRESH_REQ = false;
     private ArrayList<Cell> allFilesPaths;
     private ArrayList<String> projectsList = new ArrayList<>();
 
@@ -131,7 +135,13 @@ public class ProjectActivity extends AppCompatActivity implements AdapterView.On
         recyclerView.setDrawingCacheQuality(View.DRAWING_CACHE_QUALITY_HIGH);
 
         ArrayList<Cell> cells = prepareData();
-        MyAdapter adapter = new MyAdapter(getApplicationContext(), cells);
+        MyAdapter adapter = new MyAdapter(this, cells);
+        adapter.setOnPhotoDeletedListener(new MyAdapter.OnPhotoDeletedListener() {
+            @Override
+            public void onPhotoDeleted() {
+                populateSpinnerProject();
+            }
+        });
         recyclerView.setAdapter(adapter);
     }
 
@@ -166,6 +176,7 @@ public class ProjectActivity extends AppCompatActivity implements AdapterView.On
                 }
             }
         }
+        Collections.sort(allFiles, new Cell.CellComparator().reversed());
         return allFiles;
     }
 
@@ -255,7 +266,7 @@ public class ProjectActivity extends AppCompatActivity implements AdapterView.On
         };
 
         AlertDialog.Builder builder = new AlertDialog.Builder(view.getContext());
-        builder.setMessage("Are you sure? All project data will be lost.").setPositiveButton("Yes", dialogClickListener).setNegativeButton("No", dialogClickListener).show();
+        builder.setMessage("Do you want to delete project? All photos will be lost.").setPositiveButton("Yes", dialogClickListener).setNegativeButton("No", dialogClickListener).show();
     }
 
     public void addProject(final View view) {
@@ -308,5 +319,21 @@ public class ProjectActivity extends AppCompatActivity implements AdapterView.On
             }
         }
         currentFile.delete();
+    }
+
+    public void navigate(View view) {
+        if (!allFilesPaths.isEmpty()) {
+            float[] latLong = ImageHelper.getLatLong(allFilesPaths.get(allFilesPaths.size()-1).getPath());
+            if (latLong == null) {
+                Toast.makeText(this, "Photo has no location", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            String uri = String.format(Locale.ENGLISH, "geo:0,0?q=%f,%f", latLong[0], latLong[1]);
+            uri = uri + spinnerProject.getSelectedItem().toString();
+            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(uri));
+            this.startActivity(intent);
+        } else {
+            Toast.makeText(this, "Project is empty!", Toast.LENGTH_SHORT).show();
+        }
     }
 }
